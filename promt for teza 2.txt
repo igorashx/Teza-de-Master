@@ -1,0 +1,637 @@
+Tu ești un agent de cod specializat în deep learning și neuroștiință computațională.
+Sarcina ta este să construiești un proiect Python complet, structurat și reproductibil,
+care să permită o comparație riguroasă între trei arhitecturi de modelare a dinamicii
+neuronale latente. Scopul este să produci rezultate suficient de solide pentru a trage
+concluzii finale despre viabilitatea temei de cercetare.
+
+═══════════════════════════════════════════════════════════════════
+TEMA DE CERCETARE
+═══════════════════════════════════════════════════════════════════
+
+"Decodarea dinamicii neuronale latente prin sisteme dinamice continue:
+o analiză comparativă a LFADS, Latent Neural ODE și Latent CfC cu
+evaluarea calității geometrice a spațiului latent"
+
+═══════════════════════════════════════════════════════════════════
+CELE DOUĂ RAMIFICĂRI ALE PROIECTULUI
+═══════════════════════════════════════════════════════════════════
+
+Proiectul conține două ramificări experimentale care rulează pe aceleași
+date și calculează aceleași metrici, dar diferă în designul encoderului.
+Rezultatele celor două ramificări se compară explicit în output-ul final.
+
+RAMIFICAREA A — Encodere uniforme (experiment de control)
+  Toate trei arhitecturi folosesc același encoder BiGRU bidirecțional.
+  Singura componentă care diferă este blocul dinamic.
+  Scopul: izolează contribuția blocului dinamic. Permite afirmații
+  cauzale clare: orice diferență în rezultate provine exclusiv din
+  natura blocului dinamic (discret vs continuu vs analitic).
+  Întrebarea de cercetare: "Care bloc dinamic este mai bun la
+  paritate completă a celorlalte componente?"
+
+RAMIFICAREA B — Encodere specifice (experiment end-to-end)
+  Fiecare arhitectură folosește encoderul teoretic optim pentru
+  natura sa dinamică. Decoderele rămân identice între arhitecturi
+  și identice cu Ramificarea A.
+  Scopul: evaluează fiecare sistem complet în configurația sa
+  naturală. Răspunde la întrebarea practică despre performanța
+  unui utilizator real care ar deploya fiecare sistem.
+  Întrebarea de cercetare: "Care sistem end-to-end complet
+  este mai bun în configurația sa arhitecturală optimă?"
+
+CONSTRÂNGERE CRITICĂ PENTRU AMBELE RAMIFICĂRI:
+  Decoderele sunt IDENTICE între toate arhitecturile și între
+  ambele ramificări — strat liniar + exponential → rate-uri Poisson.
+  Hiperparametrii de antrenare (ELBO, β, optimizer, epoci, seed-uri)
+  sunt IDENTICI între ramificări pentru comparabilitate.
+
+═══════════════════════════════════════════════════════════════════
+CELE TREI ARHITECTURI — RAMIFICAREA A (encodere uniforme)
+═══════════════════════════════════════════════════════════════════
+
+Arhitectura A1 — LFADS cu encoder uniform
+  - Encoder: BiGRU bidirecțional (hidden_size=64 per direcție)
+    care produce g0 = Linear(h_context) — condiția inițială discretă
+  - Generator: RNN GRU discret care produce z(t) la fiecare bin
+  - Decoder: strat liniar + exponential → rate-uri Poisson
+  - Antrenare: ELBO = E[log p(x|z)] - β·KL[q(z|x) || p(z)]
+
+Arhitectura A2 — Latent Neural ODE cu encoder uniform
+  - Encoder: BiGRU bidirecțional identic cu A1
+    care produce μ = Linear(h_context) și log σ² = Linear(h_context)
+  - Reparametrizare: z0 = μ + σ ⊙ ε, ε ~ N(0, I)
+  - Dinamică latentă: ODESolve(f_θ, z0, t_span)
+    f_θ este MLP(z, t) cu 3 straturi ascunse de 128 neuroni, activare Tanh
+  - Solver ODE: dopri5 cu rtol=1e-3, atol=1e-4, adjoint=True
+  - Decoder: identic cu A1
+  - Antrenare: ELBO identic
+
+Arhitectura A3 — Latent CfC cu encoder uniform
+  - Encoder: BiGRU bidirecțional identic cu A1 și A2
+    care produce μ și log σ²
+  - Reparametrizare: identică cu A2
+  - Dinamică latentă: celule CfC din librăria ncps
+    (CfCCell cu FullyConnected wiring, latent_dim unități)
+    delta_t transmis explicit la fiecare pas
+  - Decoder: identic
+  - Antrenare: ELBO identic
+
+NOTĂ ARHITECTURALĂ A: În Ramificarea A, encoderul BiGRU procesează
+spike-urile la timestamps regulate (bin size fix) și ignoră intervalele
+temporale neregulate dintre spike-uri. Aceasta introduce o inconsistență
+pentru A2 și A3: encoderele nu respectă natura continuă a dinamicii
+modelate de blocul dinamic. Această inconsistență este documentată
+explicit și constituie motivația pentru Ramificarea B.
+
+═══════════════════════════════════════════════════════════════════
+CELE TREI ARHITECTURI — RAMIFICAREA B (encodere specifice)
+═══════════════════════════════════════════════════════════════════
+
+Arhitectura B1 — LFADS cu encoder natural
+  - Encoder: BiGRU bidirecțional — IDENTIC cu A1
+    Motivare: LFADS operează în timp discret la bin size fix.
+    BiGRU este encoderul natural și optim pentru un generator discret.
+    Nu există inconsistență între encoder și generator în LFADS.
+    B1 este deci arhitectural identic cu A1 — diferența va apărea
+    doar în comparația cu B2 și B3 care au encodere diferite față
+    de ramificarea A.
+  - Generator, Decoder, Antrenare: identice cu A1
+
+Arhitectura B2 — Latent Neural ODE cu encoder ODE-RNN
+  - Encoder: ODE-RNN (Rubanova et al., 2019) — encoderul natural
+    pentru date cu timestamps neregulate și dinamică continuă.
+    Funcționare: pentru fiecare observație xₙ la timpul tₙ:
+      (1) z(tₙ) = ODESolve(f_enc, z(tₙ₋₁), [tₙ₋₁, tₙ])
+          ← integrare continuă a stării între observații
+          ← delta_t = tₙ - tₙ₋₁ transmis explicit solver-ului
+      (2) z(tₙ)⁺ = GRUCell(z(tₙ), xₙ)
+          ← actualizare la momentul observației
+    La final: μ = Linear(z(t_final)), log σ² = Linear(z(t_final))
+    Solver encoder: euler sau rk4 (mai rapid decât dopri5 pentru encoder)
+    Motivare: encoder-ul respectă natura continuă a datelor —
+    intervalele de timp neregulate dintre spike-uri sunt integrate
+    explicit, nu ignorate prin binning uniform.
+  - Reparametrizare: z0 = μ + σ ⊙ ε, identică cu A2
+  - Dinamică latentă: ODESolve(f_θ, z0, t_span) — identică cu A2
+  - Decoder: identic cu A2
+  - Antrenare: ELBO identic
+
+Arhitectura B3 — Latent CfC cu encoder CfC
+  - Encoder: CfC encoder bidirecțional — encoderul natural pentru
+    o dinamică latentă CfC cu constantă de timp variabilă.
+    Funcționare: procesează spike-urile cu celule CfC în direcție
+    forward și backward, transmițând explicit delta_t la fiecare pas:
+      h_forward  = CfCCell(xₙ, h_{n-1}, delta_t=tₙ-tₙ₋₁) pentru n=1..T
+      h_backward = CfCCell(xₙ, h_{n+1}, delta_t=tₙ₊₁-tₙ) pentru n=T..1
+      h_context  = concat(h_forward_T, h_backward_0)
+      μ = Linear(h_context), log σ² = Linear(h_context)
+    Motivare: encoderul CfC are constantă de timp variabilă τ(x,I,t)
+    care mimează adaptarea temporală a neuronilor reali. Consistența
+    cu blocul dinamic CfC este completă: ambele componente operează
+    cu aceeași filosofie de modelare a timpului continuu.
+  - Reparametrizare: z0 = μ + σ ⊙ ε, identică cu A3
+  - Dinamică latentă: CfC — identică cu A3
+  - Decoder: identic
+  - Antrenare: ELBO identic
+
+NOTĂ ARHITECTURALĂ B: B1 = A1 arhitectural. Diferența față de
+Ramificarea A apare exclusiv la B2 (ODE-RNN în loc de BiGRU) și
+B3 (CfC encoder în loc de BiGRU). Prin urmare, ablation-ul real
+este: (A2 vs B2) pentru Neural ODE și (A3 vs B3) pentru CfC.
+Dacă B2 > A2 și B3 > A3 în metrici NLB și geometrice, confirmi că
+encoderele specifice adaugă valoare dincolo de blocul dinamic.
+
+═══════════════════════════════════════════════════════════════════
+SETURILE DE DATE
+═══════════════════════════════════════════════════════════════════
+
+Dataset 0 — Lorenz Sintetic (validare metodologică, primul rulat)
+  - Generezi un sistem Lorenz (σ=10, ρ=28, β=8/3) cu scipy.integrate.solve_ivp
+  - Din traiectoria Lorenz produci rate-uri de firing:
+      λ_i(t) = exp(C @ z_lorenz(t) + d), C aleatoriu fix, d bias aleatoriu fix
+  - Din rate-uri produci spike trains prin sampling Poisson:
+      x_i(t) ~ Poisson(λ_i(t) · Δt), Δt = 5ms
+  - Parametri: 50 neuroni, 500 trial-uri, 200 pași temporali per trial (1 secundă)
+  - Scopul primar: verifici că toate arhitecturile recuperează atractorul
+    Lorenz din spațiul latent (ground truth cunoscut)
+  - Scopul secundar pentru analiza dinamică: sistemul Lorenz are exponent
+    Lyapunov maxim λ₁ ≈ 0.906. Verifici că modelele care recuperează
+    corect atractorul reproduc și această proprietate dinamică.
+    Dacă un model produce λ₁ < 0 pe date Lorenz, dinamica sa latentă
+    este calitativ incorectă — criteriu de eșec clar și măsurabil.
+  - Rulezi ambele ramificări pe Lorenz. Pe date Lorenz, timestamps-urile
+    sunt regulate (Δt = 5ms fix) — deci diferența dintre BiGRU și
+    ODE-RNN encoder ar trebui să fie mică. Aceasta este o verificare
+    de sanitate: dacă B2 >> A2 pe date regulate, există o problemă
+    de implementare, nu un avantaj real al ODE-RNN.
+
+Dataset 1 — NLB MC_Maze (benchmark principal — dinamică rotațională)
+  - Descărcare prin: pip install nlb-tools, apoi nlb_tools.make_tensors()
+  - Folosești varianta MC_Maze-S (100 trial-uri) pentru iterații rapide
+    și MC_Maze-M (250 trial-uri) pentru rezultatele finale
+  - Bin size: 5ms
+  - Neuroni: 182, Trial-uri antrenare: variabil prin scalare
+  - Evaluare pe metricile NLB oficiale: co-bps și vel-R²
+  - Comportament asociat: viteza mâinii (hand_vel) pentru decodare
+  - Tip dinamic așteptat: cicluri limită (dinamică rotațională)
+  - Notă pentru Ramificarea B: NLB furnizează date binned la 5ms —
+    timestamps-urile sunt tehnic regulate în acest format. Totuși,
+    în interiorul fiecărui bin pot exista 0 sau mai multe spike-uri,
+    iar ODE-RNN poate trata bin-urile goale diferit față de cele cu
+    spike-uri prin delta_t consistent. Documentezi dacă această
+    diferență produce îmbunătățiri măsurabile.
+
+Dataset 2 — NLB DMFC_RSG (benchmark principal — dinamică cognitivă)
+  - Descărcare identică prin nlb_tools
+  - Neuroni: 54, Trial-uri: 1289 total
+  - Bin size: 5ms
+  - Evaluare pe metricile NLB oficiale: co-bps și rt-R²
+  - Comportament asociat: reaction time pentru decodare
+  - Tip dinamic așteptat: dinamică de rampă convergentă spre puncte fixe
+
+═══════════════════════════════════════════════════════════════════
+STRUCTURA PROIECTULUI (obligatorie)
+═══════════════════════════════════════════════════════════════════
+
+neural_latent_comparison/
+├── README.md
+├── requirements.txt
+├── configs/
+│   ├── lorenz.yaml
+│   ├── mc_maze.yaml
+│   └── dmfc_rsg.yaml
+├── data/
+│   ├── lorenz_generator.py         # generare date sintetice Lorenz
+│   ├── nlb_loader.py               # wrapper pentru nlb_tools
+│   └── preprocessing.py            # normalizare, binning, train/val/test split
+├── models/
+│   ├── base.py                     # clasa abstractă comună tuturor modelelor
+│   │
+│   ├── encoders/
+│   │   ├── bigru_encoder.py        # BiGRU bidirecțional — folosit în Ram. A
+│   │   │                           # și ca encoder natural pentru LFADS în Ram. B
+│   │   ├── ode_rnn_encoder.py      # ODE-RNN (Rubanova 2019) — Ram. B pentru NODE
+│   │   └── cfc_encoder.py          # CfC bidirecțional — Ram. B pentru CfC
+│   │
+│   ├── decoders/
+│   │   └── poisson_decoder.py      # Linear + exp — identic pentru toți
+│   │
+│   ├── dynamics/
+│   │   ├── gru_generator.py        # generator GRU discret — pentru LFADS
+│   │   ├── node_dynamics.py        # ODESolve cu f_θ MLP — pentru NODE
+│   │   └── cfc_dynamics.py         # celule CfC ncps — pentru CfC
+│   │
+│   ├── branch_a/                   # Ramificarea A — encodere uniforme
+│   │   ├── lfads_a.py              # A1: BiGRU + GRU generator
+│   │   ├── latent_node_a.py        # A2: BiGRU + ODESolve
+│   │   └── latent_cfc_a.py         # A3: BiGRU + CfC
+│   │
+│   └── branch_b/                   # Ramificarea B — encodere specifice
+│       ├── lfads_b.py              # B1: BiGRU + GRU generator (= A1)
+│       ├── latent_node_b.py        # B2: ODE-RNN + ODESolve
+│       └── latent_cfc_b.py         # B3: CfC encoder + CfC dynamics
+│
+├── training/
+│   ├── trainer.py                  # training loop comun pentru ambele ramificări
+│   ├── losses.py                   # ELBO, KL divergence, Poisson NLL
+│   └── scheduler.py                # KL annealing (β de la 0 la β_max în 50 epoci)
+│
+├── evaluation/
+│   ├── nlb_metrics.py              # co-bps, vel-R², rt-R²
+│   ├── reconstruction.py           # co-smoothing R², PSTH R²
+│   ├── decoding.py                 # regresie Ridge din latent la comportament
+│   ├── geometric/
+│   │   ├── dimensionality.py       # participation ratio, TwoNN ID
+│   │   ├── smoothness.py           # variație totală traiectorii latente
+│   │   ├── separability.py         # LDA R² separabilitate condiții
+│   │   └── marble_analysis.py      # MARBLE — câmpuri vectoriale locale
+│   └── dynamical/
+│       ├── fixed_points.py         # găsire și clasificare puncte fixe
+│       ├── stability.py            # Jacobian, valori proprii, tip stabilitate
+│       ├── lyapunov.py             # exponentii Lyapunov (algoritm QR)
+│       ├── limit_cycles.py         # cicluri limită, exponentii Floquet
+│       ├── bifurcations.py         # diagrame de bifurcație la varierea θ
+│       ├── vector_field.py         # câmp vectorial f(z,t,θ), divergență
+│       └── lfads_discrete.py       # analiza dinamică pentru generatorul
+│                                   # RNN discret (|λ| < 1 timp discret)
+│
+├── experiments/
+│   ├── run_lorenz.py               # rulează ambele ramificări pe Lorenz
+│   ├── run_mc_maze.py              # rulează ambele ramificări pe MC_Maze
+│   ├── run_dmfc_rsg.py             # rulează ambele ramificări pe DMFC_RSG
+│   ├── run_branch_a.py             # entry point exclusiv Ramificarea A
+│   ├── run_branch_b.py             # entry point exclusiv Ramificarea B
+│   └── ablations/
+│       ├── solver_comparison.py    # dopri5 vs euler vs rk4 (NODE, Ram. A)
+│       ├── latent_dim_sweep.py     # sweep [4,8,16,32] (ambele ramificări)
+│       └── encoder_ablation.py     # comparație directă A2 vs B2, A3 vs B3
+│                                   # izolând contribuția encoderului specific
+│
+├── visualization/
+│   ├── latent_trajectories.py      # PCA și jPCA pe traiectorii latente
+│   ├── vector_fields.py            # câmp vectorial al ODE-ului antrenat
+│   ├── attractor_plots.py          # 3D plot atrактори în spațiul latent
+│   ├── fixed_point_plots.py        # puncte fixe cu bazine de atracție
+│   ├── eigenvalue_plots.py         # spectrul valorilor proprii plan complex
+│   ├── lyapunov_plots.py           # convergența exponentilor Lyapunov
+│   ├── bifurcation_plots.py        # diagrame de bifurcație
+│   ├── jpca_plots.py               # planele jPCA pentru dinamică rotațională
+│   ├── branch_comparison_plots.py  # comparație Ram. A vs Ram. B per model
+│   ├── comparison_plots.py         # tabele comparative între modele
+│   └── umap_plots.py               # UMAP latent space colorat per condiție
+│
+└── results/
+    ├── branch_a/
+    │   ├── lorenz/
+    │   ├── mc_maze/
+    │   └── dmfc_rsg/
+    ├── branch_b/
+    │   ├── lorenz/
+    │   ├── mc_maze/
+    │   └── dmfc_rsg/
+    └── comparison/                 # comparații între ramificări
+
+═══════════════════════════════════════════════════════════════════
+METRICILE DE EVALUARE (toate obligatorii, aplicate ambelor ramificări)
+═══════════════════════════════════════════════════════════════════
+
+Grup A — Metrici NLB oficiale (reconstrucție spike trains)
+  - co-bps: co-smoothing bits per spike pe neuroni held-out
+  - vel-R²: R² regresie Ridge din latent la viteza mâinii (MC_Maze)
+  - rt-R²: R² regresie Ridge din latent la reaction time (DMFC_RSG)
+  - PSTH-R²: corelație PSTH inférat vs empiric
+
+Grup B — Calitatea geometrică a spațiului latent
+  - Participation Ratio (PR): (Σλ_i)² / Σλ_i²
+  - Dimensionalitate intrinsecă (ID): estimator TwoNN (scikit-dimension)
+  - Smoothness index: (1/N) Σ_n Σ_t ||z(t+1) - z(t)||₂
+  - Trajectory consistency: std inter-trial per condiție
+  - Linear separability R² (LDA): clasificator liniar condiții din latent
+
+Grup C — Eficiență computațională
+  - Timp antrenare per epocă (secunde, mediat 10 epoci)
+  - Memorie GPU peak MB (torch.cuda.max_memory_allocated()), dacă s-a folosit GPU
+  - Număr apeluri f_θ per forward pass
+  - Convergență: epoci până la stabilizarea ELBO (±1%)
+  - NOTĂ: Ramificarea B poate fi mai lentă pentru B2 (ODE-RNN encoder
+    adaugă un solver suplimentar în encoder). Documentezi overhead-ul.
+
+Grup D — Analiza MARBLE
+  - Local Flow Field similarity între modele (același dataset)
+  - Consistența structurii dinamice între condiții
+  - Instalare: pip install MARBLE (github.com/agoramaHub/MARBLE)
+  - În caz că nu e diponibil pe Windows curat (fără WSL2) omite aceatsă metodă din proiect.
+
+Grup E — Analiza dinamică a spațiului latent ca sistem dinamic
+
+  E1. Puncte fixe și clasificarea lor
+      - Găsești z* prin minimizarea ||f(z*, θ)||² cu Adam
+        (5000 iterații, lr=1e-3, 100 condiții inițiale aleatoare)
+      - Jacobian: J(z*) = ∂f/∂z|_{z=z*} via torch.autograd.functional.jacobian
+      - Valori proprii: torch.linalg.eigvals(J)
+      - Clasificare după Re(λᵢ):
+          toate Re(λᵢ) < 0          → punct fix stabil (atractor)
+          cel puțin Re(λᵢ) > 0      → instabil (repulsor sau șa)
+          λ complex cu Re < 0        → spirală stabilă
+          λ complex cu Re > 0        → spirală instabilă
+      - Pentru LFADS: matrice de tranziție linearizată, |λᵢ| < 1 (discret)
+      - Raportezi: număr total puncte fixe, număr stabile, distribuție λ
+
+  E2. Stabilitate Lyapunov — spectrul complet
+      - Algoritm QR: integrezi traiectoria + d perturbații ortogonale,
+        QR decomposition la fiecare pas, exponentii = log mediu diag(R)
+      - Exponent maxim λ₁:
+          λ₁ > 0  → haotic (așteptat Lorenz: λ₁ ≈ 0.906)
+          λ₁ < 0  → disipativ (așteptat MC_Maze, DMFC_RSG)
+          λ₁ = 0  → ciclu limită
+      - Criteriu eșec Lorenz: dacă λ₁ < 0 pe date Lorenz → eșec calitativ
+      - Raportezi spectrul complet {λ₁..λ_d} per model per ramificare
+
+  E3. Cicluri limită și exponentii Floquet (MC_Maze)
+      - Detectare: z(t+T) ≈ z(t), T estimat prin FFT pe z(t)
+      - Matrice monodromie: M = ∂z(T)/∂z(0) via ecuația variațională
+        dΦ/dt = J(z(t))·Φ, Φ(0) = I
+      - Exponentii Floquet: log(|μᵢ|)/T, μᵢ valori proprii M
+      - Ciclu stabil: toți exponentii Floquet negativi (în afara unuia = 0)
+      - Raportezi: număr cicluri, exponentii Floquet, perioadă T, stabilitate
+
+  E4. Analiza bifurcațiilor
+      - Scalezi câmpul vectorial: f_α(z,θ) = α·f(z,θ), α ∈ [0.1, 2.0]
+      - La fiecare α: găsești punctele fixe și valorile proprii Jacobian
+      - Detectezi bifurcații: schimbări calitative în număr/tip puncte fixe
+      - Diagrama de bifurcație: Re(λ_max) vs α per model
+      - Identifici α_c critic și tipul bifurcației (saddle-node, Hopf, pitchfork)
+
+  E5. Analiza câmpului vectorial f(z, θ) (NODE și CfC)
+      - Grilă uniformă în spațiul latent (2D/3D prin PCA)
+      - Calculezi f(z,θ) pe grilă, vizualizezi streamlines
+      - Nulcline: locuri unde componenta i a lui f este 0
+      - Divergența: div(f) = Tr(∂f/∂z) = Tr(J)
+        Divergență negativă → sistem disipativ
+      - Compari divergența medie de-a lungul traiectoriilor NODE vs CfC
+      - Aplici E5 atât pe modelele din Ram. A cât și din Ram. B
+
+  E6. Comparație asimetrică LFADS vs NODE/CfC
+      Tabel explicit al instrumentelor aplicabile per arhitectură:
+
+      Instrument analitic        | LFADS   | NODE    | CfC
+      ---------------------------|---------|---------|--------
+      Puncte fixe (autograd)     |   NU    |   DA    |   DA
+      Jacobian direct            |   NU    |   DA    |   DA
+      Exponentii Lyapunov (QR)   |  PARȚ.  |   DA    |   DA
+      Cicluri limită (Floquet)   |   NU    |   DA    |   DA
+      Divergența câmpului f      |   NU    |   DA    |   DA
+      Diagrama de bifurcație     |  PARȚ.  |   DA    |   DA
+      Stabilitate timp discret   |   DA    |   NU    |   NU
+
+      Această asimetrie este ea însăși un rezultat: modelele continue
+      sunt mai analizabile matematic, nu doar mai precise numeric.
+      Tabelul se generează automat și se salvează în results/comparison/.
+
+Grup F — Comparație inter-ramificări (NOU față de design anterior)
+  Aceasta este analiza care răspunde la întrebarea pusă de observația
+  despre encodere. Se calculează pentru perechile (A2 vs B2) și (A3 vs B3).
+  B1 = A1, deci nu există comparație pentru LFADS.
+
+  F1. Delta de performanță NLB prin encoder specific
+      - Δ co-bps   = co-bps(B2) - co-bps(A2) și co-bps(B3) - co-bps(A3)
+      - Δ vel-R²   = vel-R²(B2) - vel-R²(A2) și vel-R²(B3) - vel-R²(A3)
+      - Test statistic: paired t-test pe cele 3 seed-uri
+      - Interpretare: dacă Δ > 0 și p < 0.05 → encoderul specific adaugă
+        valoare măsurabilă; dacă Δ ≈ 0 → blocul dinamic este factorul
+        determinant, encoderul contează puțin
+
+  F2. Delta de calitate geometrică prin encoder specific
+      - Δ PR, Δ ID, Δ Smoothness, Δ LDA R² pentru (A2 vs B2) și (A3 vs B3)
+      - Întrebarea: encoderul specific produce spații latente mai bine
+        organizate geometric, independent de acuratețea reconstrucției?
+
+  F3. Delta de structură dinamică prin encoder specific
+      - Δ număr puncte fixe stabile, Δ λ₁, Δ exponenți Floquet
+      - Întrebarea: encoderul specific influențează structura dinamică
+        a spațiului latent, sau doar performanța de reconstrucție?
+
+  F4. Overhead computațional al encoderului specific
+      - Δ timp antrenare per epocă (B2 vs A2, B3 vs A3)
+      - Δ memorie GPU peak
+      - Raport beneficiu/cost: (Δ co-bps) / (Δ timp antrenare)
+
+  F5. Concluzie sintetică inter-ramificări (generată automat)
+      - Dacă Δ co-bps > 0.01 bps și p < 0.05 pentru B2 vs A2:
+        "Encoderul ODE-RNN adaugă valoare semnificativă pentru NODE"
+      - Dacă Δ co-bps ≤ 0.01 sau p ≥ 0.05:
+        "Blocul dinamic este factorul determinant pentru NODE;
+         encoderul specific nu adaugă valoare semnificativă"
+      - Același raționament pentru B3 vs A3 (CfC encoder)
+      - Această concluzie răspunde explicit la întrebarea de cercetare
+        secundară a proiectului
+
+═══════════════════════════════════════════════════════════════════
+HIPERPARAMETRI COMUNI (identici pentru ambele ramificări și toți pașii)
+═══════════════════════════════════════════════════════════════════
+
+Dimensiune spațiu latent:    16 (default), sweep pe [4, 8, 16, 32]
+Dimensiune encoder hidden:   128 (BiGRU: hidden_size=64 per direcție;
+                             ODE-RNN: state_dim=128; CfC enc: units=128)
+Dimensiune generator hidden: 128
+Dimensiune decoder:          liniar (latent_dim → n_neurons)
+Optimizer:                   Adam, lr=1e-3, weight_decay=1e-5
+Batch size:                  64 trial-uri
+Epoci maxime:                200 cu early stopping (patience=20)
+β_max (KL weight):           1.0
+KL annealing:                liniar de la 0 la β_max în primele 50 epoci
+Gradient clipping:           max_norm=10.0
+Seed:                        [42, 123, 456] pentru fiecare model
+                             (raportezi media ± std pe cele 3 seed-uri)
+Solver encoder ODE-RNN:      euler (rapid, suficient pentru encoder)
+Solver dinamic NODE:         dopri5, rtol=1e-3, atol=1e-4, adjoint=True
+
+═══════════════════════════════════════════════════════════════════
+CONSTRÂNGERI DE IMPLEMENTARE
+═══════════════════════════════════════════════════════════════════
+
+1. Mediu de execuție țintă: proiect în VSCode.
+   Analiza dinamică (Grup E) se rulează o singură dată pe best model
+   per arhitectură după antrenare — nu la fiecare epocă.
+
+2. Reproductibilitate: torch.manual_seed(), numpy.random.seed(),
+   random.seed() la începutul fiecărui experiment.
+   Toate configurațiile salvate în YAML.
+   Rulezi cu 3 seed-uri diferite per arhitectură per ramificare.
+
+3. Logging: wandb pentru logging în timp real. Loghezi la fiecare epocă:
+   ELBO total, reconstruction loss, KL loss, learning rate, co-bps val,
+   vel-R² val. Tag-uiești fiecare run cu branch="A" sau branch="B"
+   pentru filtrare ușoară în dashboard. Fallback la CSV local dacă
+   wandb nu este disponibil.
+
+4. Salvare checkpoints: best model (după val co-bps) și last model
+   pentru fiecare arhitectură × ramificare × dataset × seed.
+   Format: .pt (torch.save). Directoare separate branch_a/ și branch_b/.
+
+5. Librării permise:
+   - torchdiffeq: ODESolve pentru NODE și ODE-RNN encoder
+   - ncps: celule CfC pentru dinamică și encoder CfC
+   - nlb-tools: loading date NLB și metrici oficiale
+   - scikit-learn: Ridge regression, LDA
+   - umap-learn: vizualizare UMAP
+   - scikit-dimension: estimator TwoNN
+   - MARBLE: câmpuri vectoriale locale
+   - scipy: integrare ODE Lorenz, FFT detectare cicluri limită
+   - matplotlib, seaborn: vizualizări
+
+6. LFADS se implementează de la zero în models/dynamics/gru_generator.py
+   și models/branch_a/lfads_a.py — fără librării externe LFADS.
+
+7. Modulele din models/encoders/, models/decoders/ și models/dynamics/
+   sunt componente reutilizabile. Modelele din branch_a/ și branch_b/
+   le compun, nu le duplică. Nicio logică de antrenare nu se repetă
+   între ramificări — trainer.py este unic și acceptă orice model
+   care extinde models/base.py.
+
+8. Toate funcțiile publice au docstrings Google style și type hints.
+
+9. Analiza dinamică (Grup E) se implementează în evaluation/dynamical/
+   și se apelează exclusiv pe best model per arhitectură după antrenare.
+   Comparația inter-ramificări (Grup F) se calculează în
+   evaluation/branch_comparison.py după ce ambele ramificări sunt complete.
+
+═══════════════════════════════════════════════════════════════════
+ORDINEA EXPERIMENTELOR (obligatorie — nu sari pași)
+═══════════════════════════════════════════════════════════════════
+
+Pasul 1 — Validare pipeline pe Lorenz sintetic (ambele ramificări)
+  Rulezi A1, A2, A3 și B2, B3 pe date Lorenz (B1=A1, nu se repetă).
+  Verifici ELBO convergent și co-smoothing R² > 0.7 pentru toți.
+  Rulezi analiza dinamică Grup E pe best model per arhitectură:
+    - Verifici λ₁ ≈ 0.906 pentru NODE și CfC (ambele ramificări)
+    - Dacă λ₁ < 0 pe Lorenz → model marcat eșuat calitativ
+  Verifici că Δ co-bps (B2 vs A2) ≈ 0 pe Lorenz (timestamps regulate)
+    ca test de sanitate pentru implementarea ODE-RNN encoder.
+  Dacă oricare model eșuează pe Lorenz la ambele criterii, oprești
+  și diagnostichezi înainte de a trece la pasul 2.
+
+Pasul 2 — Benchmark rapid pe MC_Maze-S (ambele ramificări)
+  Rulezi toți cei 5 pași (A1, A2, A3, B2, B3) pe MC_Maze-S cu un seed.
+  Identifici probleme de antrenare (explozie gradient, KL collapse).
+  Rulezi E1 (puncte fixe) și E3 (cicluri limită) pentru verificare structură.
+  Calculezi primele delta inter-ramificări (F1) ca preview.
+
+Pasul 3 — Benchmark complet pe MC_Maze-M și DMFC_RSG (ambele ramificări)
+  Rulezi toți cei 5 pași cu 3 seed-uri pe fiecare dataset.
+  Calculezi toate metricile din Grupele A, B, C, D.
+  Rulezi analiza dinamică completă Grup E pe best model per arhitectură:
+    - MC_Maze: focus E3 (cicluri limită) și E5 (câmp vectorial)
+    - DMFC_RSG: focus E1 (puncte fixe stabile) și E2 (stabilitate)
+  Calculezi toate comparațiile inter-ramificări din Grupul F.
+  Produci toate vizualizările.
+
+Pasul 4 — Ablation studies
+  4a. Solver comparison: dopri5 vs euler vs rk4 pentru NODE (Ram. A)
+      pe MC_Maze-S. Acuratețe vs timp. Verifici dacă solver-ul
+      afectează și exponentii Lyapunov calculați post-antrenare.
+  4b. Latent dim sweep [4,8,16,32] pentru toți (ambele ramificări)
+      pe MC_Maze-S. Compari PR, ID, co-bps și număr puncte fixe.
+  4c. Encoder ablation (experiments/ablations/encoder_ablation.py):
+      Rulezi A2 vs B2 și A3 vs B3 în condiții complet controlate
+      (același seed, același dataset, aceiași hiperparametri).
+      Aceasta este analiza F1-F4 în formă concentrată și reproductibilă.
+
+Pasul 5 — Analiza MARBLE (ambele ramificări)
+  Extragi traiectorii latente din best model per arhitectură per ramificare.
+  Aplici MARBLE pe fiecare set de traiectorii.
+  Compari LFF similarity: între modele din aceeași ramificare,
+  și între ramificări pentru același model (A2 vs B2, A3 vs B3).
+
+Pasul 6 — Sinteza comparativă completă
+  Generezi tabelul E6 (analizabilitate dinamică per arhitectură).
+  Generezi concluziile F5 (valoarea encoderului specific).
+  Compari spectrul Lyapunov, punctele fixe, Floquet între modele și ramificări.
+  Generezi results/conclusions.md cu toate concluziile finale.
+
+═══════════════════════════════════════════════════════════════════
+OUTPUT FINAL AȘTEPTAT
+═══════════════════════════════════════════════════════════════════
+
+1. results/branch_a/summary_table.csv și
+   results/branch_b/summary_table.csv
+   Tabele cu toate metricile A,B,C,D per model × dataset × seed.
+
+2. results/comparison/branch_comparison_table.csv
+   Tabel cu Δ metrici (F1-F4) pentru (A2 vs B2) și (A3 vs B3)
+   pe fiecare dataset, cu medie ± std și p-value paired t-test.
+
+3. results/comparison/dynamical_analysis_table.csv
+   Model × ramificare × dataset → număr puncte fixe stabile, λ₁,
+   număr cicluri limită, exponentii Floquet medii, divergență medie,
+   tip bifurcație detectat.
+
+4. results/figures/ — minim 22 figuri:
+   - Fig 01: Atractorul Lorenz recuperat — toate arhitecturile Ram. A și B
+   - Fig 02: λ₁ pe date Lorenz — comparație toate arhitecturile ambele ramificări
+   - Fig 03: ELBO convergence curves (toate modele, toate datasets, ambele ram.)
+   - Fig 04: co-bps comparison — Ram. A vs Ram. B per model per dataset
+   - Fig 05: vel-R² și rt-R² comparison — Ram. A vs Ram. B
+   - Fig 06: Δ co-bps (B2 vs A2, B3 vs A3) per dataset cu interval de confidență
+   - Fig 07: Traiectorii latente PCA per condiție (MC_Maze) — toate 5 arhitecturi
+   - Fig 08: jPCA plot (MC_Maze) — toate 5 arhitecturi
+   - Fig 09: UMAP latent space — toate 5 arhitecturi pe MC_Maze
+   - Fig 10: Participation Ratio și TwoNN ID — toate modele × ramificări × datasets
+   - Fig 11: Smoothness index comparison — Ram. A vs Ram. B
+   - Fig 12: Latent dim sweep — co-bps vs PR vs ID (ambele ramificări)
+   - Fig 13: Solver comparison NODE (Ram. A, MC_Maze-S)
+   - Fig 14: MARBLE Local Flow Fields — toate arhitecturi, MC_Maze, ambele ram.
+   - Fig 15: Puncte fixe în spațiul latent 2D/3D (PCA) — MC_Maze și DMFC_RSG
+   - Fig 16: Spectrul valorilor proprii în planul complex — toate arhitecturi
+   - Fig 17: Spectrul Lyapunov complet {λ₁..λ_d} — toate modele × datasets
+   - Fig 18: Cicluri limită detectate pe MC_Maze — orbite 3D cu Floquet
+   - Fig 19: Diagrama de bifurcație Re(λ_max) vs α — NODE și CfC (ambele ram.)
+   - Fig 20: Câmp vectorial f(z,θ) cu streamlines — NODE vs CfC (ambele ram.)
+   - Fig 21: Tabel E6 vizualizat — analizabilitate dinamică per arhitectură
+   - Fig 22: Overhead computațional Ram. B vs Ram. A (timp, memorie, co-bps)
+
+5. results/conclusions.md — generat automat cu:
+   - Cel mai bun model per metrică NLB (separat pe Ram. A și Ram. B)
+   - Cel mai bun model per metrică geometrică
+   - Cel mai bun model per metrică dinamică
+   - Răspuns la F5: adaugă encoderul specific valoare pentru NODE și CfC?
+   - Trade-off eficiență vs calitate (CfC vs NODE, Ram. A vs Ram. B)
+   - Concluzie dinamică: continuu vs discret — analizabilitate matematică
+   - Răspuns explicit: arhitecturile continue produc spații latente cu
+     structură dinamică mai bogată, mai stabilă și mai analizabilă
+     decât generatorul discret al LFADS?
+
+6. Dacă e posibil formează și salvează graficile și alte informații vizuale prin plotly pentru o post navigare web interactivă.
+
+═══════════════════════════════════════════════════════════════════
+PRIMUL PAS AL AGENTULUI
+═══════════════════════════════════════════════════════════════════
+
+Înainte de a scrie orice cod, agentul va:
+1. Crea structura de directoare completă descrisă mai sus
+2. Folosește un mediu virtual
+3. Crea requirements.txt cu versiunile exacte ale tuturor librăriilor
+4. Crea README.md cu instrucțiunile de instalare și rulare, inclusiv
+   secțiune dedicată diferenței dintre Ramificarea A și Ramificarea B
+5. Crea configs/lorenz.yaml cu toți hiperparametrii, inclusiv parametrii
+   pentru analiza dinamică și flaguri branch_a / branch_b
+6. Implementa data/lorenz_generator.py și verifica că:
+   (a) spike trains au firing rate mediu 5-20 Hz
+   (b) sistemul Lorenz generat are λ₁ ≈ 0.906 prin algoritmul QR
+       (verificare numerică obligatorie înainte de orice altceva)
+
+Abia după validarea pasului 5, agentul trece la implementarea
+componentelor în această ordine strictă:
+  models/encoders/bigru_encoder.py
+  models/encoders/ode_rnn_encoder.py
+  models/encoders/cfc_encoder.py
+  models/decoders/poisson_decoder.py
+  models/dynamics/gru_generator.py
+  models/dynamics/node_dynamics.py
+  models/dynamics/cfc_dynamics.py
+  models/branch_a/ (compune componentele de mai sus)
+  models/branch_b/ (compune componentele de mai sus)
+  training/losses.py → training/trainer.py
+  evaluation/ (în ordinea: nlb_metrics → geometric → dynamical)
+  experiments/ (în ordinea: lorenz → mc_maze → dmfc_rsg → ablations)
+  visualization/
